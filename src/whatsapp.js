@@ -58,6 +58,38 @@ function formatSenderId(senderId) {
     .replace(/@lid$/i, '');
 }
 
+function shouldForwardMedia(message) {
+  return message.hasMedia && ['image', 'audio', 'ptt'].includes(message.type);
+}
+
+function getMediaExtension(mimetype, fallback) {
+  if (!mimetype) {
+    return fallback;
+  }
+
+  if (mimetype.includes('jpeg')) return 'jpg';
+  if (mimetype.includes('png')) return 'png';
+  if (mimetype.includes('webp')) return 'webp';
+  if (mimetype.includes('ogg')) return 'ogg';
+  if (mimetype.includes('mpeg')) return 'mp3';
+  if (mimetype.includes('mp4')) return 'mp4';
+
+  return fallback;
+}
+
+function buildMediaFilename(message, media) {
+  if (media?.filename) {
+    return media.filename;
+  }
+
+  const extension = getMediaExtension(
+    media?.mimetype,
+    message.type === 'image' ? 'jpg' : 'bin'
+  );
+
+  return `whatsapp-${message.type || 'arquivo'}-${message.timestamp || Date.now()}.${extension}`;
+}
+
 function createWhatsAppClient() {
   client = new Client({
     authStrategy: new LocalAuth({
@@ -105,10 +137,24 @@ function createWhatsAppClient() {
   client.on('message', async (message) => {
     try {
       const senderId = await resolveSenderId(message);
+      let media = null;
+
+      if (shouldForwardMedia(message)) {
+        const downloadedMedia = await message.downloadMedia();
+
+        if (downloadedMedia?.data) {
+          media = {
+            data: downloadedMedia.data,
+            mimetype: downloadedMedia.mimetype || 'application/octet-stream',
+            filename: buildMediaFilename(message, downloadedMedia)
+          };
+        }
+      }
 
       await postToDiscord({
         from: formatSenderId(senderId),
         body: message.body,
+        media,
         type: message.type,
         pushname: message._data?.notifyName || message._data?.pushname || null
       });
