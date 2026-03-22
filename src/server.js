@@ -23,6 +23,12 @@ function apiKeyGuard(req, res, next) {
   return next();
 }
 
+function normalizeWhatsAppNumber(numero) {
+  if (!numero) return '';
+
+  return String(numero).replace(/\D/g, '');
+}
+
 /**
  * @openapi
  * /health:
@@ -48,6 +54,13 @@ app.get('/health', (req, res) => {
  *     tags: [Mensagens]
  *     security:
  *       - ApiKeyAuth: []
+ *     parameters:
+ *       - in: header
+ *         name: x-api-key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Chave da API para autenticação
  *     requestBody:
  *       required: true
  *       content:
@@ -73,17 +86,42 @@ app.post('/enviar', apiKeyGuard, async (req, res) => {
     const { numero, texto } = req.body || {};
 
     if (!numero || !texto) {
-      return res.status(400).json({ error: 'Os campos numero e texto são obrigatórios.' });
+      return res.status(400).json({
+        error: 'Os campos numero e texto são obrigatórios.'
+      });
     }
 
-    const result = await sendMessage(numero, texto);
+    const numeroLimpo = normalizeWhatsAppNumber(numero);
+
+    if (!numeroLimpo) {
+      return res.status(400).json({
+        error: 'Número inválido.'
+      });
+    }
+
+    if (numeroLimpo.length < 12 || numeroLimpo.length > 13) {
+      return res.status(400).json({
+        error: 'O número deve estar no formato DDI + DDD + número, sem símbolos.'
+      });
+    }
+
+    const chatId = `${numeroLimpo}@c.us`;
+
+    const result = await sendMessage(chatId, texto);
+
     return res.status(200).json({
       success: true,
       message: 'Mensagem enviada com sucesso.',
-      data: result
+      data: {
+        numero: numeroLimpo,
+        chatId,
+        result
+      }
     });
   } catch (error) {
-    return res.status(500).json({ error: error.message || 'Erro interno ao enviar mensagem.' });
+    return res.status(500).json({
+      error: error.message || 'Erro interno ao enviar mensagem.'
+    });
   }
 });
 

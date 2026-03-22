@@ -5,6 +5,58 @@ const { postToDiscord } = require('./discord');
 
 let client;
 let isReady = false;
+let isInitializing = false;
+
+async function resolveSenderId(message) {
+  const senderId = message.author || message.from;
+
+  if (!senderId) {
+    return null;
+  }
+
+  if (!senderId.endsWith('@lid')) {
+    return senderId;
+  }
+
+  try {
+    const contacts = await client.getContactLidAndPhone([senderId]);
+    const phoneId = contacts?.[0]?.pn;
+
+    if (phoneId) {
+      return phoneId;
+    }
+  } catch (error) {
+    console.warn('[WhatsApp] Nao foi possivel converter LID para numero:', error.message);
+  }
+
+  try {
+    const contact = await message.getContact();
+
+    if (contact?.number) {
+      return `${contact.number}@c.us`;
+    }
+  } catch (error) {
+    console.warn('[WhatsApp] Nao foi possivel obter o contato do remetente:', error.message);
+  }
+
+  return senderId;
+}
+
+function formatSenderId(senderId) {
+  const digits = String(senderId || '').replace(/\D/g, '');
+
+  if (digits.length === 12 && digits.startsWith('55')) {
+    return `(${digits.slice(2, 4)})${digits.slice(4)}`;
+  }
+
+  if (digits.length === 13 && digits.startsWith('55')) {
+    return `(${digits.slice(2, 4)})${digits.slice(4)}`;
+  }
+
+  return String(senderId || '')
+    .replace(/@c\.us$/i, '')
+    .replace(/@lid$/i, '');
+}
 
 function createWhatsAppClient() {
   client = new Client({
@@ -13,7 +65,7 @@ function createWhatsAppClient() {
     }),
     puppeteer: {
       headless,
-      executablePath: chromeExecutablePath,
+      executablePath: chromeExecutablePath || undefined,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -34,23 +86,28 @@ function createWhatsAppClient() {
 
   client.on('ready', () => {
     isReady = true;
+    isInitializing = false;
     console.log('[WhatsApp] Cliente pronto para enviar e receber mensagens.');
   });
 
   client.on('disconnected', (reason) => {
     isReady = false;
+    isInitializing = false;
     console.warn(`[WhatsApp] Cliente desconectado. Motivo: ${reason}`);
   });
 
   client.on('auth_failure', (msg) => {
     isReady = false;
+    isInitializing = false;
     console.error('[WhatsApp] Falha de autenticação:', msg);
   });
 
   client.on('message', async (message) => {
     try {
+      const senderId = await resolveSenderId(message);
+
       await postToDiscord({
-        from: message.from,
+        from: formatSenderId(senderId),
         body: message.body,
         type: message.type,
         pushname: message._data?.notifyName || message._data?.pushname || null
@@ -64,10 +121,19 @@ function createWhatsAppClient() {
 }
 
 async function initWhatsApp() {
+  if (client && isReady) {
+    return client;
+  }
+
   if (!client) {
     createWhatsAppClient();
   }
 
+  if (isInitializing) {
+    return client;
+  }
+
+  isInitializing = true;
   await client.initialize();
   return client;
 }
@@ -79,29 +145,78 @@ function getClient() {
 function getStatus() {
   return {
     ready: isReady,
-    hasClient: Boolean(client)
+    hasClient: Boolean(client),
+    initializing: isInitializing
   };
 }
 
-async function sendMessage(numero, texto) {
-  if (!client || !isReady) {
-    throw new Error('Cliente do WhatsApp ainda não está pronto.');
+function normalizeNumber(numero) {
+  return String(numero || '').replace(/\D/g, '');
+}
+
+function buildChatId(numeroOuChatId) {
+  const valor = String(numeroOuChatId || '').trim();
+
+  if (valor.endsWith('@c.us')) {
+    const numeroLimpo = valor.replace('@c.us', '').replace(/\D/g, '');
+
+    if (!/^\d{12,14}$/.test(numeroLimpo)) {
+      throw new Error('Número inválido. Use o formato 5579991298422.');
+    }
+
+    return `${numeroLimpo}@c.us`;
   }
 
-  const sanitized = String(numero).replace(/\D/g, '');
+  const sanitized = normalizeNumber(valor);
+
   if (!/^\d{12,14}$/.test(sanitized)) {
     throw new Error('Número inválido. Use o formato 5579991298422.');
   }
 
-  const chatId = `${sanitized}@c.us`;
-  const response = await client.sendMessage(chatId, texto);
+  return `${sanitized}@c.us`;
+}
 
-  return {
-    id: response.id?._serialized,
-    to: chatId,
-    body: response.body,
-    timestamp: response.timestamp
-  };
+async function sendMessage(numeroOuChatId, texto) {
+  if (!client || !isReady) {
+    throw new Error('Cliente do WhatsApp ainda não está pronto.');
+  }
+
+  if (!texto || !String(texto).trim()) {
+    throw new Error('Texto da mensagem é obrigatório.');
+  }
+
+  const chatId = buildChatId(numeroOuChatId);
+
+  let numberId = null;
+
+  try {
+    numberId = await client.getNumberId(chatId);
+  } catch (error) {
+    throw new Error(`Erro ao validar número no WhatsApp: ${error.message}`);
+  }
+
+  if (!numberId || !numberId._serialized) {
+    throw new Error('Número não está registrado no WhatsApp.');
+  }
+
+  const destinoFinal = numberId._serialized;
+
+  try {
+    const response = await client.sendMessage(destinoFinal, texto);
+
+    return {
+      id: response.id?._serialized || null,
+      to: destinoFinal,
+      body: response.body,
+      timestamp: response.timestamp
+    };
+  } catch (error) {
+    if (String(error.message || '').includes('No LID for user')) {
+      throw new Error('Não foi possível localizar esse usuário no WhatsApp. Verifique se o número existe e está correto.');
+    }
+
+    throw error;
+  }
 }
 
 module.exports = {
