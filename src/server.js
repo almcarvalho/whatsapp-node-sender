@@ -138,6 +138,6 @@ app.listen(port, async () => {
   try {
     await initWhatsApp();
   } catch (error) {
-    console.error('[WhatsApp] Erro ao inicializar cliente:', error.message);
+    console.error('[WhatsApp] Erro ao inicializar cliente:', error);
   }
 });

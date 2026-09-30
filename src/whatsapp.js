@@ -6,6 +6,25 @@ const { postToDiscord } = require('./discord');
 let client;
 let isReady = false;
 let isInitializing = false;
+const monitoredPages = new WeakSet();
+
+function monitorBrowserErrors() {
+  const page = client?.pupPage;
+  if (!page || monitoredPages.has(page)) return;
+  monitoredPages.add(page);
+
+  page.on('pageerror', (error) => {
+    console.error('[WhatsApp Browser] Erro JavaScript:', error);
+  });
+  page.on('error', (error) => {
+    console.error('[WhatsApp Browser] Falha na pagina:', error);
+  });
+  page.on('console', (message) => {
+    if (message.type() === 'error') {
+      console.error('[WhatsApp Browser] Console:', message.text());
+    }
+  });
+}
 
 async function resolveSenderId(message) {
   const senderId = message.author || message.from;
@@ -108,12 +127,27 @@ function createWhatsAppClient() {
   });
 
   client.on('qr', (qr) => {
+    monitorBrowserErrors();
     console.log('\nEscaneie o QR Code abaixo no WhatsApp:\n');
     qrcode.generate(qr, { small: true });
   });
 
   client.on('authenticated', () => {
+    monitorBrowserErrors();
     console.log('[WhatsApp] Autenticado com sucesso.');
+  });
+
+  client.on('loading_screen', (percent, message) => {
+    monitorBrowserErrors();
+    console.log(`[WhatsApp] Carregando: ${percent}% - ${message}`);
+  });
+
+  client.on('change_state', (state) => {
+    console.log('[WhatsApp] Estado da conexao:', state);
+  });
+
+  client.on('error', (error) => {
+    console.error('[WhatsApp] Erro do cliente:', error);
   });
 
   client.on('ready', () => {
@@ -180,7 +214,14 @@ async function initWhatsApp() {
   }
 
   isInitializing = true;
-  await client.initialize();
+  try {
+    await client.initialize();
+    monitorBrowserErrors();
+  } catch (error) {
+    isReady = false;
+    isInitializing = false;
+    throw error;
+  }
   return client;
 }
 
@@ -248,13 +289,19 @@ async function sendMessage(numeroOuChatId, texto) {
   const destinoFinal = numberId._serialized;
 
   try {
-    const response = await client.sendMessage(destinoFinal, texto);
+    const response = await client.sendMessage(destinoFinal, texto, {
+      waitUntilMsgSent: true
+    });
+
+    if (!response) {
+      console.warn('[WhatsApp] Envio concluido sem metadados da mensagem retornados pela biblioteca.');
+    }
 
     return {
-      id: response.id?._serialized || null,
+      id: response?.id?._serialized || null,
       to: destinoFinal,
-      body: response.body,
-      timestamp: response.timestamp
+      body: response?.body ?? texto,
+      timestamp: response?.timestamp ?? null
     };
   } catch (error) {
     if (String(error.message || '').includes('No LID for user')) {
